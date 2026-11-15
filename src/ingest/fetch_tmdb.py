@@ -44,6 +44,7 @@ TOP10_FILE = "data/processed/top10_titles.csv"
 UPCOMING_FILE = "data/raw/titles.csv"
 CACHE_FILE = "data/processed/tmdb_cache.json"
 OUT_FILE = "data/processed/title_table.csv"
+OVERRIDES_FILE = "data/raw/tmdb_overrides.csv"  # hand fixes for wrong matches
 
 session = requests.Session()
 TOKEN = TOKEN.strip()
@@ -154,6 +155,36 @@ def load_titles():
     return pd.concat([top, up], ignore_index=True)
 
 
+def apply_overrides(cache):
+    """Replace wrong automatic matches with the TMDB ids in OVERRIDES_FILE.
+
+    A blank tmdb_id means "no good match on TMDB". Overridden rows get
+    tmdb_match = 'manual' (or 'none'), and are only re-fetched when the id changes.
+    """
+    if not os.path.exists(OVERRIDES_FILE):
+        return
+    fixes = pd.read_csv(OVERRIDES_FILE, dtype=str).fillna("")
+    changed = 0
+    for _, f in fixes.iterrows():
+        key = f"{f['media']}|{f['search_name']}"
+        want = f["tmdb_id"].strip()
+        have = cache.get(key, {})
+        if not want:
+            new = {"match": "none", "info": {}}
+            if have != new:
+                cache[key] = new
+                changed += 1
+            continue
+        if have.get("match") == "manual" and str(have.get("info", {}).get("tmdb_id")) == want:
+            continue
+        cache[key] = {"match": "manual", "info": flatten(details(int(want), f["media"]), f["media"])}
+        changed += 1
+    if changed:
+        with open(CACHE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+    print(f"Applied {len(fixes)} manual overrides ({changed} updated).")
+
+
 def main():
     titles = load_titles()
     cache = {}
@@ -181,6 +212,8 @@ def main():
             print(f"  {i}/{len(todo)} looked up")
         time.sleep(0.05)
 
+    apply_overrides(cache)
+
     rows = []
     for _, r in titles.iterrows():
         hit = cache.get(f"{r['media']}|{r['search_name']}", {})
@@ -192,7 +225,7 @@ def main():
     print(f"\nSaved {len(out)} rows to {OUT_FILE}")
     print(out.groupby("source")["tmdb_match"].value_counts().to_string())
     print("\n'exact' = name matched; 'fuzzy' = TMDB's best guess, worth spot-checking; "
-          "'none' = not found on TMDB.")
+          "'manual' = fixed in data/raw/tmdb_overrides.csv; 'none' = not found on TMDB.")
 
 
 if __name__ == "__main__":
